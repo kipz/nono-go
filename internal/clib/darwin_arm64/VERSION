@@ -1,0 +1,4 @@
+# nono upstream commit used to build libnono_ffi.a for darwin/arm64
+# Update this file whenever the bundled library is rebuilt.
+# Run scripts/build-libs.sh to rebuild from the latest upstream commit.
+unknown

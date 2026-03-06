@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14          # arm64 — uses bundled darwin_arm64 library
+            platform: darwin_arm64
+            needs-lib-build: false
+          - os: ubuntu-latest     # amd64
+            platform: linux_amd64
+            needs-lib-build: true
+            cargo-target: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install Rust toolchain
+        if: matrix.needs-lib-build
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.cargo-target }}
+
+      - name: Resolve nono HEAD SHA
+        if: matrix.needs-lib-build
+        id: nono-rev
+        run: |
+          sha=$(git ls-remote https://github.com/always-further/nono.git HEAD | cut -f1)
+          if ! echo "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "Invalid SHA from git ls-remote: $sha" >&2; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo registry
+        if: matrix.needs-lib-build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ matrix.cargo-target }}-${{ steps.nono-rev.outputs.sha }}
+          restore-keys: cargo-registry-${{ matrix.cargo-target }}-
+
+      - name: Clone and build nono-ffi
+        if: matrix.needs-lib-build
+        env:
+          CARGO_TARGET: ${{ matrix.cargo-target }}
+          PLATFORM: ${{ matrix.platform }}
+          NONO_SHA: ${{ steps.nono-rev.outputs.sha }}
+        run: |
+          git init /tmp/nono-src
+          git -C /tmp/nono-src remote add origin https://github.com/always-further/nono.git
+          git -C /tmp/nono-src fetch --depth=1 origin "$NONO_SHA"
+          git -C /tmp/nono-src checkout FETCH_HEAD
+          cargo build --release \
+            --manifest-path /tmp/nono-src/Cargo.toml \
+            -p nono-ffi \
+            --target "$CARGO_TARGET"
+          cp "/tmp/nono-src/target/$CARGO_TARGET/release/libnono_ffi.a" \
+            "internal/clib/$PLATFORM/libnono_ffi.a"
+          echo "# nono upstream commit used to build libnono_ffi.a for $PLATFORM" \
+            > "internal/clib/$PLATFORM/VERSION"
+          echo "# Update this file whenever the bundled library is rebuilt." \
+            >> "internal/clib/$PLATFORM/VERSION"
+          echo "$NONO_SHA" >> "internal/clib/$PLATFORM/VERSION"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -v -count=1 ./...
+
+  lint:
+    name: lint
+    # Linting runs only on macOS because the linux_amd64 static library is not
+    # bundled in the repo (it is built in the test job). staticcheck requires
+    # a successful CGo build; see .github/workflows/ci.yml test job for Linux.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@2024.1.1
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: staticcheck ./...
