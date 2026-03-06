@@ -965,3 +965,320 @@ func TestApplyNilAndClosed(t *testing.T) {
 		}
 	})
 }
+
+// TestIsSupportedTrue verifies IsSupported() returns true on supported platforms.
+func TestIsSupportedTrue(t *testing.T) {
+	t.Parallel()
+	if !nono.IsSupported() {
+		t.Error("IsSupported() = false; expected true on this platform")
+	}
+}
+
+// TestPathCoveredClosedSet verifies that PathCovered on a closed set returns (false, nil).
+func TestPathCoveredClosedSet(t *testing.T) {
+	t.Parallel()
+	cs := nono.New()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	covered, err := cs.PathCovered("/any/path")
+	if err != nil {
+		t.Fatalf("PathCovered on closed set: expected nil error, got %v", err)
+	}
+	if covered {
+		t.Error("PathCovered on closed set: expected false, got true")
+	}
+}
+
+// TestPathCoveredNULByte verifies that PathCovered rejects NUL-containing paths.
+func TestPathCoveredNULByte(t *testing.T) {
+	t.Parallel()
+	cs := newCapSetWithAnyPath(t)
+	_, err := cs.PathCovered("/data\x00/injected")
+	if err == nil {
+		t.Fatal("PathCovered: expected ErrInvalidArg for NUL-containing path, got nil")
+	}
+	if !errors.Is(err, nono.ErrInvalidArg) {
+		t.Errorf("PathCovered: expected ErrInvalidArg, got %v", err)
+	}
+}
+
+// TestSummaryClosedSet verifies that Summary on a closed set returns an empty string.
+func TestSummaryClosedSet(t *testing.T) {
+	t.Parallel()
+	cs := nono.New()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := cs.Summary(); got != "" {
+		t.Errorf("Summary on closed set = %q, want empty string", got)
+	}
+}
+
+// TestFSCapabilitiesClosedSet verifies that FSCapabilities on a closed set returns nil.
+func TestFSCapabilitiesClosedSet(t *testing.T) {
+	t.Parallel()
+	cs := nono.New()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := cs.FSCapabilities(); got != nil {
+		t.Errorf("FSCapabilities on closed set = %v, want nil", got)
+	}
+}
+
+// TestDeduplicateClosedSet verifies that Deduplicate on a closed set returns ErrInvalidArg.
+func TestDeduplicateClosedSet(t *testing.T) {
+	t.Parallel()
+	cs := nono.New()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	err := cs.Deduplicate()
+	if err == nil {
+		t.Fatal("Deduplicate on closed set: expected error, got nil")
+	}
+	if !errors.Is(err, nono.ErrInvalidArg) {
+		t.Errorf("Deduplicate on closed set: expected ErrInvalidArg, got %v", err)
+	}
+}
+
+// TestAllowPathExpectsDirectory verifies that AllowPath on a regular file returns ErrExpectedDirectory.
+func TestAllowPathExpectsDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cs := newCapSet(t)
+	err := cs.AllowPath(path, nono.AccessRead)
+	if err == nil {
+		t.Fatal("AllowPath on file: expected error, got nil")
+	}
+	if !errors.Is(err, nono.ErrExpectedDirectory) {
+		t.Errorf("AllowPath on file: expected ErrExpectedDirectory, got %v", err)
+	}
+}
+
+// TestAllowFileExpectsFile verifies that AllowFile on a directory returns ErrExpectedFile.
+func TestAllowFileExpectsFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cs := newCapSet(t)
+	err := cs.AllowFile(dir, nono.AccessRead)
+	if err == nil {
+		t.Fatal("AllowFile on directory: expected error, got nil")
+	}
+	if !errors.Is(err, nono.ErrExpectedFile) {
+		t.Errorf("AllowFile on directory: expected ErrExpectedFile, got %v", err)
+	}
+}
+
+// TestAllowFileInvalid verifies that AllowFile on a non-existent path returns ErrPathNotFound.
+func TestAllowFileInvalid(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	err := cs.AllowFile("/this/path/does/not/exist/12345.txt", nono.AccessRead)
+	if err == nil {
+		t.Fatal("AllowFile on non-existent path: expected error, got nil")
+	}
+	if !errors.Is(err, nono.ErrPathNotFound) {
+		t.Errorf("AllowFile on non-existent path: expected ErrPathNotFound, got %v", err)
+	}
+}
+
+// TestAllowFileAccessModes verifies that AllowFile succeeds for write and read-write modes.
+func TestAllowFileAccessModes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	for _, mode := range []nono.AccessMode{nono.AccessWrite, nono.AccessReadWrite} {
+		t.Run(mode.String(), func(t *testing.T) {
+			t.Parallel()
+			cs := newCapSet(t)
+			if err := cs.AllowFile(path, mode); err != nil {
+				t.Fatalf("AllowFile(%v): %v", mode, err)
+			}
+		})
+	}
+}
+
+// TestFSCapabilitiesMultiplePaths verifies that FSCapabilities returns all added paths in order.
+func TestFSCapabilitiesMultiplePaths(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	dirs := make([]string, 3)
+	for i := range dirs {
+		dirs[i] = t.TempDir()
+		if err := cs.AllowPath(dirs[i], nono.AccessRead); err != nil {
+			t.Fatalf("AllowPath(%q): %v", dirs[i], err)
+		}
+	}
+	caps := cs.FSCapabilities()
+	if len(caps) != 3 {
+		t.Fatalf("expected 3 capabilities, got %d", len(caps))
+	}
+}
+
+// TestSetNetworkBlockedInteraction verifies that SetNetworkBlocked(true) sets the
+// network mode to NetworkBlocked, and SetNetworkBlocked(false) sets it to NetworkAllowAll.
+func TestSetNetworkBlockedInteraction(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+
+	if err := cs.SetNetworkBlocked(true); err != nil {
+		t.Fatalf("SetNetworkBlocked(true): %v", err)
+	}
+	if got := cs.NetworkMode(); got != nono.NetworkBlocked {
+		t.Errorf("after SetNetworkBlocked(true): NetworkMode() = %v, want NetworkBlocked", got)
+	}
+
+	if err := cs.SetNetworkBlocked(false); err != nil {
+		t.Fatalf("SetNetworkBlocked(false): %v", err)
+	}
+	if got := cs.NetworkMode(); got != nono.NetworkAllowAll {
+		t.Errorf("after SetNetworkBlocked(false): NetworkMode() = %v, want NetworkAllowAll", got)
+	}
+}
+
+// TestQueryContextDoubleClose verifies that closing a QueryContext twice is safe.
+func TestQueryContextDoubleClose(t *testing.T) {
+	t.Parallel()
+	cs := newCapSetWithAnyPath(t)
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	if err := qc.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := qc.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestQueryContextClosedContext verifies that QueryPath and QueryNetwork on a closed
+// QueryContext return ErrInvalidArg.
+func TestQueryContextClosedContext(t *testing.T) {
+	t.Parallel()
+	cs := newCapSetWithAnyPath(t)
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	if err := qc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	t.Run("QueryPath", func(t *testing.T) {
+		t.Parallel()
+		_, err := qc.QueryPath("/any/path", nono.AccessRead)
+		if err == nil {
+			t.Fatal("expected error on closed context, got nil")
+		}
+		if !errors.Is(err, nono.ErrInvalidArg) {
+			t.Errorf("expected ErrInvalidArg, got %v", err)
+		}
+	})
+	t.Run("QueryNetwork", func(t *testing.T) {
+		t.Parallel()
+		_, err := qc.QueryNetwork()
+		if err == nil {
+			t.Fatal("expected error on closed context, got nil")
+		}
+		if !errors.Is(err, nono.ErrInvalidArg) {
+			t.Errorf("expected ErrInvalidArg, got %v", err)
+		}
+	})
+}
+
+// TestQueryNetworkAllowed verifies that QueryNetwork returns QueryAllowed with
+// ReasonNetworkAllowed when the network mode is NetworkAllowAll.
+func TestQueryNetworkAllowed(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	if err := cs.SetNetworkMode(nono.NetworkAllowAll); err != nil {
+		t.Fatalf("SetNetworkMode(AllowAll): %v", err)
+	}
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	t.Cleanup(func() { _ = qc.Close() })
+
+	result, err := qc.QueryNetwork()
+	if err != nil {
+		t.Fatalf("QueryNetwork: %v", err)
+	}
+	if result.Status != nono.QueryAllowed {
+		t.Errorf("expected QueryAllowed, got %v", result.Status)
+	}
+	if result.Reason != nono.ReasonNetworkAllowed {
+		t.Errorf("expected ReasonNetworkAllowed, got %v", result.Reason)
+	}
+}
+
+// TestQueryPathInsufficientAccess verifies that querying write access on a read-only
+// path returns ReasonInsufficientAccess and populates ActualAccess and RequestedAccess.
+func TestQueryPathInsufficientAccess(t *testing.T) {
+	t.Parallel()
+	cs, dir := newCapSetWithPath(t) // AllowPath with AccessRead
+
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	t.Cleanup(func() { _ = qc.Close() })
+
+	result, err := qc.QueryPath(dir, nono.AccessWrite)
+	if err != nil {
+		t.Fatalf("QueryPath: %v", err)
+	}
+	if result.Status != nono.QueryDenied {
+		t.Errorf("expected QueryDenied, got %v", result.Status)
+	}
+	if result.Reason != nono.ReasonInsufficientAccess {
+		t.Errorf("expected ReasonInsufficientAccess, got %v", result.Reason)
+	}
+	if result.ActualAccess == "" {
+		t.Error("ActualAccess should be non-empty for ReasonInsufficientAccess")
+	}
+	if result.RequestedAccess == "" {
+		t.Error("RequestedAccess should be non-empty for ReasonInsufficientAccess")
+	}
+}
+
+// TestQueryContextSnapshotIsolation verifies that modifications to a CapabilitySet
+// after creating a QueryContext do not affect the QueryContext's snapshot.
+func TestQueryContextSnapshotIsolation(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	dir := t.TempDir()
+
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	t.Cleanup(func() { _ = qc.Close() })
+
+	// Add a path after the QueryContext was created; the QC should not see it.
+	if err := cs.AllowPath(dir, nono.AccessRead); err != nil {
+		t.Fatalf("AllowPath after NewQueryContext: %v", err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := qc.QueryPath(resolved, nono.AccessRead)
+	if err != nil {
+		t.Fatalf("QueryPath: %v", err)
+	}
+	if result.Status != nono.QueryDenied {
+		t.Errorf("snapshot isolation broken: QueryPath returned %v, want QueryDenied", result.Status)
+	}
+}

@@ -135,7 +135,7 @@ func isOK(code C.int) bool { return code == 0 }
 // truncates at the first NUL byte; for a security library this must be an error
 // rather than silent data loss.
 func checkNUL(s string) error {
-	if strings.ContainsRune(s, 0) {
+	if strings.ContainsRune(s, '\x00') {
 		return staticError(ErrCodeInvalidArg, "string contains NUL byte")
 	}
 	return nil
