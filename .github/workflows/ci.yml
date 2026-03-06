@@ -57,6 +57,10 @@ jobs:
           key: cargo-registry-${{ matrix.cargo-target }}-${{ steps.nono-rev.outputs.sha }}
           restore-keys: cargo-registry-${{ matrix.cargo-target }}-
 
+      - name: Install system dependencies
+        if: matrix.needs-lib-build
+        run: sudo apt-get install -y libdbus-1-dev pkg-config
+
       - name: Clone and build nono-ffi
         if: matrix.needs-lib-build
         env:
@@ -101,7 +105,7 @@ jobs:
           cache: true
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@2024.1.1
+        run: go install honnef.co/go/tools/cmd/staticcheck@2025.1
 
       - name: go vet
         run: go vet ./...
