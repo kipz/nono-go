@@ -1,6 +1,6 @@
 # nono-go
 
-[![CI](https://github.com/always-further/nono-go/actions/workflows/ci.yml/badge.svg)](https://github.com/always-further/nono-go/actions/workflows/ci.yml)
+[![CI](https://github.com/kipz/nono-go/actions/workflows/ci.yml/badge.svg)](https://github.com/kipz/nono-go/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/always-further/nono-go.svg)](https://pkg.go.dev/github.com/always-further/nono-go)
 
 Go CGo bindings for the [nono](https://github.com/always-further/nono) capability-based security sandbox.
@@ -12,17 +12,16 @@ nono applies an irreversible, least-privilege sandbox to the current process usi
 | OS    | Arch  | Library bundled? |
 |-------|-------|------------------|
 | macOS | arm64 | yes              |
-| macOS | amd64 | build required  |
-| Linux | amd64 | build required  |
-| Linux | arm64 | build required  |
+| macOS | amd64 | yes              |
+| Linux | amd64 | yes              |
+| Linux | arm64 | yes              |
 
-darwin/arm64 works out of the box. All other platforms require building the native library first (see [Building native libraries](#building-native-libraries)).
+All platforms work out of the box. The static libraries for all four targets are bundled in the repository.
 
 ## Prerequisites
 
 - Go 1.24+
 - A C toolchain (`gcc` or `clang`) for CGo
-- For building missing native libs: Rust stable toolchain + `cargo`, and `cargo cross` for cross-compilation
 
 ## Installation
 
@@ -32,7 +31,9 @@ go get github.com/always-further/nono-go
 
 ## Building native libraries
 
-`scripts/build-libs.sh` clones the upstream nono repository, cross-compiles `libnono_ffi.a` for all four targets, and copies the results into `internal/clib/`.
+The bundled libraries are built from the upstream [nono](https://github.com/always-further/nono) repository using `scripts/build-libs.sh`. Run this script when you want to update the bundled libraries to a newer nono upstream commit.
+
+**Requirements:** `cargo` (for Apple targets), Docker (for Linux targets — uses `rust:latest` via emulation)
 
 ```sh
 # Clone nono automatically and build all targets
@@ -40,18 +41,6 @@ go get github.com/always-further/nono-go
 
 # Use an existing nono checkout
 ./scripts/build-libs.sh --nono-src /path/to/nono
-```
-
-To build a single target manually:
-
-```sh
-cargo build --release \
-  --manifest-path /path/to/nono/Cargo.toml \
-  -p nono-ffi \
-  --target x86_64-unknown-linux-gnu
-
-cp /path/to/nono/target/x86_64-unknown-linux-gnu/release/libnono_ffi.a \
-  internal/clib/linux_amd64/libnono_ffi.a
 ```
 
 ## Testing

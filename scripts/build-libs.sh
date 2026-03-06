@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build and bundle static libraries for all supported platforms.
-# Requires: cargo, cargo cross (for cross-compilation)
+# Requires: cargo (for Apple targets), docker (for Linux targets via rust:latest image)
 # Usage: ./scripts/build-libs.sh [--nono-src /path/to/nono]
 
 set -euo pipefail
@@ -24,15 +24,44 @@ if [[ -z "$NONO_SRC" ]]; then
     git clone --depth=1 https://github.com/always-further/nono.git "$NONO_SRC"
 fi
 
+is_linux_target() {
+    [[ "$1" == *-linux-* ]]
+}
+
+linux_docker_platform() {
+    case "$1" in
+        x86_64-*) echo "linux/amd64" ;;
+        aarch64-*) echo "linux/arm64" ;;
+        *) echo "Unknown linux architecture for triple: $1" >&2; exit 1 ;;
+    esac
+}
+
 build_target() {
     local triple="$1"
     local dest_dir="$2"
 
     echo "Building for $triple..."
-    # Use workspace root + -p nono-ffi, consistent with the CI workflow.
-    cargo build --release --manifest-path "$NONO_SRC/Cargo.toml" -p nono-ffi --target "$triple"
+    if is_linux_target "$triple"; then
+        # Build natively inside a Rust Docker image (run under emulation on macOS).
+        # rust:latest is Debian Bookworm with GCC 12, avoiding the GCC 9 memcmp bug.
+        # Clear the native target/release dir between Linux builds since both platforms
+        # write to the same path (no target triple in the path for native builds).
+        rm -rf "$NONO_SRC/target/release"
+        local docker_platform
+        docker_platform="$(linux_docker_platform "$triple")"
+        docker run --rm \
+            --platform "$docker_platform" \
+            -v "$NONO_SRC:/src" \
+            rust:latest \
+            sh -c "apt-get update -qq && apt-get install -y -qq libdbus-1-dev pkg-config && cargo build --release --manifest-path /src/Cargo.toml -p nono-ffi"
+        local lib_src="$NONO_SRC/target/release/libnono_ffi.a"
+    else
+        cargo build --release --manifest-path "$NONO_SRC/Cargo.toml" -p nono-ffi --target "$triple"
+        local lib_src="$NONO_SRC/target/$triple/release/libnono_ffi.a"
+    fi
+
     mkdir -p "$dest_dir"
-    cp "$NONO_SRC/target/$triple/release/libnono_ffi.a" "$dest_dir/libnono_ffi.a"
+    cp "$lib_src" "$dest_dir/libnono_ffi.a"
     echo "  -> $dest_dir/libnono_ffi.a"
     # Record which upstream commit was used, matching the format written by CI.
     local sha

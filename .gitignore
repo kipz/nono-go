@@ -7,9 +7,5 @@ coverage.html
 # Binaries
 /nono-go
 
-# Built native libraries — ignore all, except the bundled darwin/arm64 one
-internal/clib/*/libnono_ffi.a
-!internal/clib/darwin_arm64/libnono_ffi.a
-
 # macOS
 .DS_Store
