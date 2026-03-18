@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -1280,5 +1281,268 @@ func TestQueryContextSnapshotIsolation(t *testing.T) {
 	}
 	if result.Status != nono.QueryDenied {
 		t.Errorf("snapshot isolation broken: QueryPath returned %v, want QueryDenied", result.Status)
+	}
+}
+
+// TestClosedCapabilitySetReadOnlyAccessors verifies that read-only accessors on
+// a closed set return documented zero values without error.
+func TestClosedCapabilitySetReadOnlyAccessors(t *testing.T) {
+	t.Parallel()
+	cs := nono.New()
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if got := cs.NetworkMode(); got != nono.NetworkBlocked {
+		t.Errorf("NetworkMode on closed set = %v, want NetworkBlocked", got)
+	}
+	if got := cs.ProxyPort(); got != 0 {
+		t.Errorf("ProxyPort on closed set = %d, want 0", got)
+	}
+	if cs.IsNetworkBlocked() {
+		t.Error("IsNetworkBlocked on closed set should be false")
+	}
+	if got := cs.Summary(); got != "" {
+		t.Errorf("Summary on closed set = %q, want empty string", got)
+	}
+}
+
+// TestSandboxStateDoubleClose verifies that closing a SandboxState twice is safe.
+func TestSandboxStateDoubleClose(t *testing.T) {
+	t.Parallel()
+	cs := newCapSetWithAnyPath(t)
+	state, err := nono.StateFromCaps(cs)
+	if err != nil {
+		t.Fatalf("StateFromCaps: %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+// TestDeduplicateKeepsHighestAccess verifies that deduplication of overlapping
+// paths keeps the highest access level (read + read-write → read-write).
+func TestDeduplicateKeepsHighestAccess(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	dir := t.TempDir()
+	if err := cs.AllowPath(dir, nono.AccessRead); err != nil {
+		t.Fatalf("AllowPath(Read): %v", err)
+	}
+	if err := cs.AllowPath(dir, nono.AccessReadWrite); err != nil {
+		t.Fatalf("AllowPath(ReadWrite): %v", err)
+	}
+
+	if err := cs.Deduplicate(); err != nil {
+		t.Fatalf("Deduplicate: %v", err)
+	}
+
+	caps := cs.FSCapabilities()
+	if len(caps) != 1 {
+		t.Fatalf("expected 1 cap after Deduplicate, got %d", len(caps))
+	}
+	if caps[0].Access != nono.AccessReadWrite {
+		t.Errorf("Access = %v, want AccessReadWrite", caps[0].Access)
+	}
+}
+
+// TestQueryContextConcurrent exercises the concurrent-read safety guarantees
+// documented on QueryContext.
+func TestQueryContextConcurrent(t *testing.T) {
+	t.Parallel()
+	cs, dir := newCapSetWithPath(t)
+	if err := cs.SetNetworkMode(nono.NetworkAllowAll); err != nil {
+		t.Fatalf("SetNetworkMode: %v", err)
+	}
+
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	t.Cleanup(func() { _ = qc.Close() })
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := qc.QueryPath(dir, nono.AccessRead); err != nil {
+				t.Errorf("concurrent QueryPath: %v", err)
+			}
+			if _, err := qc.QueryNetwork(); err != nil {
+				t.Errorf("concurrent QueryNetwork: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestFSCapabilityFieldCompleteness verifies that all fields of FSCapability
+// are populated correctly for a user-added directory path.
+func TestFSCapabilityFieldCompleteness(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	dir := t.TempDir()
+	if err := cs.AllowPath(dir, nono.AccessRead); err != nil {
+		t.Fatalf("AllowPath: %v", err)
+	}
+
+	caps := cs.FSCapabilities()
+	if len(caps) != 1 {
+		t.Fatalf("expected 1 cap, got %d", len(caps))
+	}
+	cap := caps[0]
+	if cap.OriginalPath == "" {
+		t.Error("OriginalPath should be non-empty")
+	}
+	if cap.ResolvedPath == "" {
+		t.Error("ResolvedPath should be non-empty")
+	}
+	if cap.Access != nono.AccessRead {
+		t.Errorf("Access = %v, want AccessRead", cap.Access)
+	}
+	if cap.Source != nono.SourceUser {
+		t.Errorf("Source = %v, want SourceUser", cap.Source)
+	}
+	if cap.GroupName != "" {
+		t.Errorf("GroupName = %q, want empty for SourceUser", cap.GroupName)
+	}
+	if cap.IsFile {
+		t.Error("IsFile should be false for a directory")
+	}
+}
+
+// TestNetworkModeBlocked verifies the SetNetworkMode(NetworkBlocked) + read-back round-trip.
+func TestNetworkModeBlocked(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	if err := cs.SetNetworkMode(nono.NetworkBlocked); err != nil {
+		t.Fatalf("SetNetworkMode(NetworkBlocked): %v", err)
+	}
+	if got := cs.NetworkMode(); got != nono.NetworkBlocked {
+		t.Errorf("NetworkMode() = %v, want NetworkBlocked", got)
+	}
+}
+
+// TestProxyPortDefaultZero verifies that ProxyPort returns 0 on a fresh set
+// and after setting a non-ProxyOnly network mode.
+func TestProxyPortDefaultZero(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	if got := cs.ProxyPort(); got != 0 {
+		t.Errorf("ProxyPort on fresh set = %d, want 0", got)
+	}
+	if err := cs.SetNetworkMode(nono.NetworkAllowAll); err != nil {
+		t.Fatalf("SetNetworkMode(AllowAll): %v", err)
+	}
+	if got := cs.ProxyPort(); got != 0 {
+		t.Errorf("ProxyPort after AllowAll = %d, want 0", got)
+	}
+}
+
+// TestSummaryContainsPath verifies that Summary includes the resolved path of
+// an allowed directory.
+func TestSummaryContainsPath(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	dir := t.TempDir()
+	if err := cs.AllowPath(dir, nono.AccessRead); err != nil {
+		t.Fatalf("AllowPath: %v", err)
+	}
+
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	summary := cs.Summary()
+	if summary == "" {
+		t.Fatal("Summary() returned empty string")
+	}
+	if !strings.Contains(summary, resolved) {
+		t.Errorf("Summary() = %q, expected it to contain resolved path %q", summary, resolved)
+	}
+}
+
+// TestQueryNetworkBlockedFields verifies that QueryNetwork when blocked returns
+// ReasonNetworkBlocked and that string fields are empty.
+func TestQueryNetworkBlockedFields(t *testing.T) {
+	t.Parallel()
+	cs := newCapSet(t)
+	if err := cs.SetNetworkBlocked(true); err != nil {
+		t.Fatalf("SetNetworkBlocked(true): %v", err)
+	}
+
+	qc, err := nono.NewQueryContext(cs)
+	if err != nil {
+		t.Fatalf("NewQueryContext: %v", err)
+	}
+	t.Cleanup(func() { _ = qc.Close() })
+
+	result, err := qc.QueryNetwork()
+	if err != nil {
+		t.Fatalf("QueryNetwork: %v", err)
+	}
+	if result.Status != nono.QueryDenied {
+		t.Errorf("expected QueryDenied, got %v", result.Status)
+	}
+	if result.Reason != nono.ReasonNetworkBlocked {
+		t.Errorf("expected ReasonNetworkBlocked, got %v", result.Reason)
+	}
+	if result.GrantedPath != "" {
+		t.Errorf("GrantedPath = %q, want empty", result.GrantedPath)
+	}
+	if result.GrantedAccess != "" {
+		t.Errorf("GrantedAccess = %q, want empty", result.GrantedAccess)
+	}
+	if result.ActualAccess != "" {
+		t.Errorf("ActualAccess = %q, want empty", result.ActualAccess)
+	}
+	if result.RequestedAccess != "" {
+		t.Errorf("RequestedAccess = %q, want empty", result.RequestedAccess)
+	}
+}
+
+// TestAllowFileFieldCompleteness verifies that all FSCapability fields are
+// correctly populated when using AllowFile.
+func TestAllowFileFieldCompleteness(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "testfile.txt")
+	if err := os.WriteFile(path, []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cs := newCapSet(t)
+	if err := cs.AllowFile(path, nono.AccessReadWrite); err != nil {
+		t.Fatalf("AllowFile: %v", err)
+	}
+
+	caps := cs.FSCapabilities()
+	if len(caps) != 1 {
+		t.Fatalf("expected 1 cap, got %d", len(caps))
+	}
+	cap := caps[0]
+	if cap.OriginalPath == "" {
+		t.Error("OriginalPath should be non-empty")
+	}
+	if cap.ResolvedPath == "" {
+		t.Error("ResolvedPath should be non-empty")
+	}
+	if cap.Access != nono.AccessReadWrite {
+		t.Errorf("Access = %v, want AccessReadWrite", cap.Access)
+	}
+	if !cap.IsFile {
+		t.Error("IsFile should be true")
+	}
+	if cap.Source != nono.SourceUser {
+		t.Errorf("Source = %v, want SourceUser", cap.Source)
+	}
+	if cap.GroupName != "" {
+		t.Errorf("GroupName = %q, want empty for SourceUser", cap.GroupName)
 	}
 }
